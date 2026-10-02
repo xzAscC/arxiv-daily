@@ -1,0 +1,25 @@
+# Research interests, grouped by "## <name>" headers (from https://xudongzhu.com).
+# Under each header, every non-empty line is either:
+#   - a free-text description of the interest, or
+#   - an arXiv ID of a representative paper (its title + abstract is fetched).
+# A paper's relevance to a group is its best match among that group's lines,
+# and its overall relevance is its best match among all groups.
+
+## Representation & Interpretability
+how large language models represent concepts in their activation space
+linear representation hypothesis and the linear structure of LLM representations
+sparse autoencoders, dictionary learning and feature discovery in language models
+probing classifiers that read concepts from LLM hidden states
+mechanistic interpretability: circuits, attribution, superposition and features
+2510.00404
+
+## Steering & Behavior Control
+activation steering and representation engineering to control LLM behavior
+steering vectors for reasoning, self-reflection, refusal, persona or safety behaviors
+controlling the behavior of LLM agents through model internals
+2506.12217
+
+## Training Dynamics
+how SFT and RL fine-tuning change the internal representations of language models
+training dynamics and emergence of capabilities during pretraining and post-training
+reinforcement learning for LLM reasoning and what it changes inside the model
