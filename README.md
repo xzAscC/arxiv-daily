@@ -1,17 +1,20 @@
 # Zotero arXiv Daily
 
-A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily) that pulls arXiv papers daily and sends personalized email digests based on your Zotero library.
+A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily) that pulls arXiv papers daily and sends personalized email digests based on your research interests.
 
 ## 🚀 Features
 
-- **Daily arXiv Integration**: Fetches new arXiv papers every day
-- **Smart Paper Ranking**: Sorts papers based on relevance to your existing Zotero collection
-- **Personalized Email Digests**: Sends curated paper recommendations directly to your inbox
+- **Daily arXiv Integration**: Fetches new (and cross-listed) papers from the arXiv RSS feed every day
+- **Interest-based Ranking**: Ranks papers with [Qwen3-Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) against the interests in `interests.txt`
+- **LLM Quality Review**: The top candidates are reviewed by GLM-5.3 via the local [pi](https://github.com/badlogic/pi-mono) CLI (or Claude via `--review_backend claude`) for relevance and quality; only the best 10 that pass the bar are sent
+- **Code & Model Links**: Flags papers with open-source code, Hugging Face models/datasets, or code promised "soon"
+- **Robust Daily Runs**: Never recommends a paper twice (`cache/sent.json`), retries the RSS feed, and emails you the traceback if a run fails
+- **Readable Email Digest**: Interest tags, scores, a Chinese TL;DR and reason, and links to PDF / arXiv / HTML / alphaXiv
 
 ## 📋 Prerequisites
 
-- Python 3.10+
-- Zotero account with API access
+- Python 3.11+, a CUDA GPU is recommended (falls back to CPU)
+- `pi` CLI with the `zai` provider logged in (or `claude` CLI for `--review_backend claude`); without it the review step is skipped
 - Gmail account (for sending emails)
 
 ## 🛠️ Installation
@@ -30,10 +33,6 @@ A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/
 3. **Set up environment variables**
    Create a `.env` file in the root directory:
    ```bash
-   # Zotero API credentials
-   ZOTERO_ID=YOUR_ZOTERO_USER_ID
-   ZOTERO_KEY=YOUR_ZOTERO_API_KEY
-   
    # Email configuration
    SENDER=your-email@gmail.com
    RECEIVER=recipient-email@domain.com
@@ -41,11 +40,18 @@ A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/
   
    ```
 
+4. **Describe your interests**
+   Edit `interests.txt`: one interest per line, either free text or an arXiv ID of a representative paper.
+   Each paper is scored by its best match among these lines.
+
 ## 🚀 Usage
 
 ### Manual Run
 ```bash
-uv run src/main.py
+uv run src/main.py            # send the email
+uv run src/main.py --dry_run  # write logs/preview.html instead
+uv run pytest                 # offline unit tests
+uv run src/main.py --help     # all options (query, top-k, review pool, quality bar, models)
 ```
 
 ## 🏗️ Project Structure
@@ -54,24 +60,15 @@ uv run src/main.py
 zotero-arxiv-daily/
 ├── src/
 │   ├── main.py              # Main execution script
-│   ├── paper.py             # arXiv and Zotero integration
+│   ├── paper.py             # arXiv fetching and interest-based ranking
+│   ├── review.py            # LLM relevance / quality review (pi or claude)
 │   ├── construct_email.py   # Email generation and sending
 │   ├── config.py            # Configuration management
 │   └── logger.py            # Logging utilities
+├── interests.txt            # Research interests
 ├── .env                     # Environment variables
 └── README.md               # This file
 ```
 
-## 📧 Email Format
-
-Each email includes:
-- **Paper Title**: Clear, prominent display
-- **Authors**: Formatted author list
-- **arXiv ID**: Direct link to paper
-- **Abstract**: Abstract of the paper
-- **PDF Link**: Direct download button
-
 ## TODO
-- [ ] Local Zotero library support
-- [ ] Better ranker function
-- [ ] Save the remote Zotero to database
+- [ ] auto run it in server

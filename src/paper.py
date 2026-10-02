@@ -1,147 +1,216 @@
-import arxiv
+import json
 import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import arxiv
 import feedparser
-
-import numpy as np
+import torch
 from loguru import logger
-from tqdm import tqdm
-from pyzotero import zotero
 from sentence_transformers import SentenceTransformer
-from datetime import datetime, timezone
+
+ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5}|[a-z\-]+(\.[A-Z]{2})?/\d{7})(v\d+)?$")
+INTEREST_PROMPT = (
+    "Instruct: Given a research interest, retrieve arXiv paper abstracts relevant to it\nQuery: "
+)
 
 
+@dataclass
 class ArxivPaper:
-    def __init__(self, paper: arxiv.Result):
-        self._paper = paper
-        self.title = paper.title
-        self.summary = paper.summary
-        self.authors = [a.name for a in paper.authors]
-        self.arxiv_id = re.sub(r"v\d+$", "", paper.get_short_id())
-        self.pdf_url = paper.pdf_url
+    title: str
+    summary: str
+    authors: list[str]
+    arxiv_id: str
+    categories: list[str] = field(default_factory=list)
+    # Filled by the embedding ranker
+    score: float = 0.0
+    interest: str = ""
+    # Filled by the LLM reviewer
+    relevance: float | None = None
+    quality: float | None = None
+    tldr: str = ""
+    reason: str = ""
+    # Filled by resources.attach_resources
+    resources: Any = None
+
+    @property
+    def abs_url(self) -> str:
+        return f"https://arxiv.org/abs/{self.arxiv_id}"
+
+    @property
+    def pdf_url(self) -> str:
+        return f"https://arxiv.org/pdf/{self.arxiv_id}"
+
+    @property
+    def final_score(self) -> float:
+        if self.relevance is None or self.quality is None:
+            return self.score
+        return 0.5 * self.relevance + 0.5 * self.quality
+
+    @classmethod
+    def from_result(cls, r: arxiv.Result) -> "ArxivPaper":
+        return cls(
+            title=r.title,
+            summary=r.summary.replace("\n", " ").strip(),
+            authors=[a.name for a in r.authors],
+            arxiv_id=re.sub(r"v\d+$", "", r.get_short_id()),
+            categories=list(r.categories),
+        )
+
+    @classmethod
+    def from_feed_entry(cls, entry) -> "ArxivPaper":
+        """Construct ArxivPaper directly from a feedparser RSS entry, avoiding arXiv API calls."""
+        raw_summary = entry.summary
+        abstract_marker = re.search(r"Abstract:\s*", raw_summary)
+        if abstract_marker:
+            raw_summary = raw_summary[abstract_marker.end():]
+        # The RSS feed puts all authors into a single comma-separated name
+        authors = [
+            name.strip()
+            for a in entry.get("authors", [])
+            for name in a.get("name", "").split(",")
+            if name.strip()
+        ]
+        return cls(
+            title=" ".join(entry.title.split()),
+            summary=" ".join(raw_summary.split()),
+            authors=authors,
+            arxiv_id=re.sub(r"v\d+$", "", entry.id.removeprefix("oai:arXiv.org:")),
+            categories=[t.term for t in entry.get("tags", [])],
+        )
+
+
+def fetch_feed(url: str, retries: int = 3, delay: int = 60):
+    """Fetch the RSS feed, retrying so a network hiccup is not mistaken for "no papers today"."""
+    for attempt in range(1, retries + 1):
+        feed = feedparser.parse(url)
+        if feed.get("status") == 200 and "title" in feed.feed:
+            return feed
+        logger.warning(f"RSS fetch attempt {attempt}/{retries} failed: {feed.get('bozo_exception') or feed.get('status')}")
+        if attempt < retries:
+            time.sleep(delay)
+    raise ConnectionError(f"Failed to fetch {url}")
 
 
 def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
-    client = arxiv.Client(num_retries=10, delay_seconds=10)
-    feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
-    if "Feed error for query" in feed.feed.title:
-        raise Exception(f"Invalid ARXIV_QUERY: {query}.")
-    if not debug:
-        # TODO: why not just use the feed directly, compared with arxiv.Search?
-        papers = []
-        all_paper_ids = [
-            i.id.removeprefix("oai:arXiv.org:")
-            for i in feed.entries
-            if i.arxiv_announce_type == "new"
-        ]
-        bar = tqdm(total=len(all_paper_ids), desc="Retrieving Arxiv papers")
-        for i in range(0, len(all_paper_ids), 50):
-            search = arxiv.Search(id_list=all_paper_ids[i : i + 50])
-            batch = [ArxivPaper(p) for p in client.results(search)]
-            bar.update(len(batch))
-            papers.extend(batch)
-        bar.close()
-
-    else:
-        logger.debug("Retrieve 5 arxiv papers regardless of the date.")
+    if debug:
+        logger.debug("Retrieve 30 arxiv papers regardless of the date.")
+        client = arxiv.Client(num_retries=3, delay_seconds=5)
         search = arxiv.Search(
-            query="cat:cs.AI", sort_by=arxiv.SortCriterion.SubmittedDate
+            query="cat:cs.CL", sort_by=arxiv.SortCriterion.SubmittedDate, max_results=30
         )
-        papers = []
-        for i in client.results(search):
-            papers.append(ArxivPaper(i))
-            if len(papers) == 5:
-                break
+        return [ArxivPaper.from_result(r) for r in client.results(search)]
 
-    return papers
+    feed = fetch_feed(f"https://rss.arxiv.org/atom/{query}")
+    if "Feed error for query" in feed.feed.get("title", ""):
+        raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+    # "new" are first submissions, "cross" are new papers cross-listed from other
+    # categories (e.g. stat.ML); revisions ("replace*") were already announced before.
+    papers: dict[str, ArxivPaper] = {}
+    for entry in feed.entries:
+        if entry.get("arxiv_announce_type") in ("new", "cross"):
+            paper = ArxivPaper.from_feed_entry(entry)
+            papers.setdefault(paper.arxiv_id, paper)
+    logger.info(f"Found {len(papers)} new papers in RSS feed.")
+    return list(papers.values())
 
 
-def get_zotero_corpus(id: str, key: str, save_to_db: bool = True) -> list[dict]:
+def load_interests(path: str | Path) -> dict[str, list[str]]:
     """
-    Retrieve Zotero corpus and optionally save to local database.
-    Only retrieves items added after the last request to avoid duplicates.
+    Load research interests from a plain text file, grouped by "## <name>" headers.
 
-    Args:
-        id: Zotero user ID
-        key: Zotero API key
-        save_to_db: Whether to save corpus to local database
-
-    Returns:
-        Filtered corpus with abstracts
+    Under each header, every non-empty line not starting with "#" is either:
+      - an arXiv ID (e.g. 2406.04093), whose title and abstract are fetched as a reference, or
+      - a free-text description of the research interest.
+    Lines before the first header go to a group named "General".
     """
-    zot = zotero.Zotero(id, "user", key)
-    collections = zot.everything(zot.collections())
-    collections = {c["key"]: c for c in collections}
-    logger.info("No previous Zotero request found, retrieving all items")
-    # Get all items if this is the first request
-    # TODO: save the items to the database, and only retrieve the items that are not in the database
-    corpus = zot.everything(
-        zot.items(
-            itemType="conferencePaper || journalArticle || preprint || WebPage || Book || computerProgram || Dataset || Manuscript || Note || Report || Thesis"
-        )
-    )
-    logger.info(f"Retrieved {len(corpus)} total items")
+    path = Path(path)
+    if not path.exists():
+        logger.warning(f"Interests file {path} not found.")
+        return {}
 
-    # Filter to only include items with abstracts
-    corpus_with_abstracts = [c for c in corpus if c["data"]["abstractNote"] != ""]
+    groups: dict[str, list[str]] = {}
+    current = "General"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("##"):
+            current = line.lstrip("#").strip()
+        elif line and not line.startswith("#"):
+            groups.setdefault(current, []).append(line)
 
-    logger.info(
-        f"Retrieved {len(corpus)} total items, {len(corpus_with_abstracts)} have abstracts"
-    )
-    # Add collection paths
-    for c in corpus_with_abstracts:
-        paths = [
-            get_collection_path(collections, col) for col in c["data"]["collections"]
-        ]
-        c["paths"] = paths
-
-    # Record this Zotero request timestamp
-    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    logger.info(
-        f"Recorded Zotero request at {current_time} with {len(corpus_with_abstracts)} items"
-    )
-
-    return corpus_with_abstracts
+    ids = [line for lines in groups.values() for line in lines if ARXIV_ID_RE.match(line)]
+    if ids:
+        seeds = load_seed_papers(ids, path.parent / "cache/seeds.json")
+        for name, lines in groups.items():
+            groups[name] = [
+                seeds.get(re.sub(r"v\d+$", "", line), "") if ARXIV_ID_RE.match(line) else line
+                for line in lines
+            ]
+            groups[name] = [line for line in groups[name] if line]
+    return {name: lines for name, lines in groups.items() if lines}
 
 
-def get_collection_path(collections: dict, col_key: str) -> str:
-    """Get the full path of a collection."""
-    if p := collections[col_key]["data"]["parentCollection"]:
-        return (
-            get_collection_path(collections, p)
-            + "/"
-            + collections[col_key]["data"]["name"]
-        )
-    else:
-        return collections[col_key]["data"]["name"]
+def load_seed_papers(ids: list[str], cache_path: Path) -> dict[str, str]:
+    """
+    Get "title. abstract" of the seed papers from the arXiv abs pages, cached on disk
+    so a flaky or rate-limited arXiv does not break the daily run.
+    """
+    from resources import fetch_abs_page
+
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    ids = [re.sub(r"v\d+$", "", i) for i in ids]
+    for arxiv_id in set(ids) - cache.keys():
+        try:
+            page = fetch_abs_page(arxiv_id)
+            cache[arxiv_id] = f"{page['title']}. {page['abstract']}"
+        except Exception as e:
+            logger.warning(f"Failed to fetch seed paper {arxiv_id}: {e!r}")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+    logger.info(f"Loaded {sum(i in cache for i in ids)}/{len(ids)} seed papers.")
+    return cache
+
+
+def load_encoder(model: str) -> SentenceTransformer:
+    """Load the embedding model on GPU, falling back to CPU if the GPU is unavailable or full."""
+    kwargs = {"model_kwargs": {"torch_dtype": "auto"}}
+    if torch.cuda.is_available():
+        try:
+            return SentenceTransformer(model, device="cuda", **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            logger.warning("GPU out of memory, falling back to CPU.")
+            torch.cuda.empty_cache()
+    return SentenceTransformer(model, device="cpu", **kwargs)
 
 
 def rerank_paper(
     candidate: list[ArxivPaper],
-    corpus: list[dict],
-    model: str = "avsolatorio/GIST-small-Embedding-v0",
+    interests: dict[str, list[str]],
+    model: str = "Qwen/Qwen3-Embedding-0.6B",
 ) -> list[ArxivPaper]:
-    # TODO: rewrite the ranker function with RAG and local zotero corpus
-    encoder = SentenceTransformer(model)
-    # sort corpus by date, from newest to oldest
-    corpus = sorted(
-        corpus,
-        key=lambda x: datetime.strptime(x["data"]["dateAdded"], "%Y-%m-%dT%H:%M:%SZ"),
-        reverse=True,
+    """Score each candidate by its best match among the interests, highest first."""
+    encoder = load_encoder(model)
+    names = [name for name, lines in interests.items() for _ in lines]
+    interest_feature = encoder.encode(
+        [line for lines in interests.values() for line in lines], prompt=INTEREST_PROMPT
     )
-    time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus)) + 1))
-    time_decay_weight = time_decay_weight / time_decay_weight.sum()
-    corpus_feature = encoder.encode([paper["data"]["abstractNote"] for paper in corpus])
-    candidate_feature = encoder.encode([paper.summary for paper in candidate])
-    sim = encoder.similarity(
-        candidate_feature, corpus_feature
-    )  # [n_candidate, n_corpus]
-    scores = (sim * time_decay_weight).sum(axis=1) * 10  # [n_candidate]
-    for s, c in zip(scores, candidate):
+    candidate_feature = encoder.encode(
+        [f"{paper.title}. {paper.summary}" for paper in candidate],
+        batch_size=16,
+        show_progress_bar=sys.stderr.isatty(),
+    )
+    sim = encoder.similarity(candidate_feature, interest_feature)  # [n_candidate, n_interest]
+    scores, best = sim.max(dim=1)
+    for s, b, c in zip(scores, best, candidate):
         c.score = s.item()
-    candidate = sorted(candidate, key=lambda x: x.score, reverse=True)
-    return candidate
+        c.interest = names[b.item()]
+    del encoder
+    torch.cuda.empty_cache()
+    return sorted(candidate, key=lambda x: x.score, reverse=True)
 
 
 if __name__ == "__main__":
-    corpus = get_zotero_corpus(ZOTERO_ID, ZOTERO_KEY)
-    print(corpus)
+    print(load_interests("interests.txt"))

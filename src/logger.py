@@ -22,8 +22,6 @@ def setup_logger(debug: bool = False, log_file: str = "logs/app.log") -> None:
     else:
         logger.add(sys.stdout, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
     
-    # Error logging to stderr
-    logger.add(sys.stderr, level="ERROR", format="<red>{time:YYYY-MM-DD HH:mm:ss}</red> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
     
     # File logging with rotation and retention
     log_path = Path(log_file)
