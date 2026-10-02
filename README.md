@@ -1,6 +1,6 @@
-# Zotero arXiv Daily
+# arXiv Daily
 
-A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily) that pulls arXiv papers daily and sends personalized email digests based on your research interests.
+Pulls new arXiv papers every day, ranks them against your research interests, has an LLM review their relevance and quality, and emails you the top 10. Originally based on [TideDra/zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily), now without Zotero.
 
 ## 🚀 Features
 
@@ -21,8 +21,8 @@ A customized version of [TideDra/zotero-arxiv-daily](https://github.com/TideDra/
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/xzAscC/zotero-arxiv-daily
-   cd zotero-arxiv-daily
+   git clone https://github.com/xzAscC/arxiv-daily
+   cd arxiv-daily
    ```
 
 2. **Install dependencies**
@@ -57,7 +57,7 @@ uv run src/main.py --help     # all options (query, top-k, review pool, quality 
 ## 🏗️ Project Structure
 
 ```
-zotero-arxiv-daily/
+arxiv-daily/
 ├── src/
 │   ├── main.py              # Main execution script
 │   ├── paper.py             # arXiv fetching and interest-based ranking

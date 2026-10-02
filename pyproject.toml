@@ -1,7 +1,7 @@
 [project]
-name = "zotero-arxiv-daily"
+name = "arxiv-daily"
 version = "0.1.0"
-description = "A customized version of zotero-arxiv-daily that pulls arXiv papers daily and sends personalized email digests based on your Zotero library."
+description = "Daily arXiv digest ranked by your research interests, reviewed by an LLM and delivered by email."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
