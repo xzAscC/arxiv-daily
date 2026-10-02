@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+.vscode/
+*.egg-info
+
+# environment variables
+.env
+
+# Virtual environments
+.venv
+test.ipynb
+
+logs
+models
+test-compose.yml
+
+# database
+*.db
+
+# jupyter notebook
+*.ipynb
